@@ -1,283 +1,95 @@
-# exchange-core
-[![Build Status](https://travis-ci.org/mzheravin/exchange-core.svg?branch=master)](https://travis-ci.org/mzheravin/exchange-core)
-[![Javadocs](https://www.javadoc.io/badge/exchange.core2/exchange-core.svg)](https://www.javadoc.io/doc/exchange.core2/exchange-core)
-[![Language grade: Java](https://img.shields.io/lgtm/grade/java/g/mzheravin/exchange-core.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/mzheravin/exchange-core/context:java)
-[![][license img]][license]
+# Durable Trading Gateway
 
-Exchange-core is an **open source market exchange core** based on 
-[LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor), 
-[Eclipse Collections](https://www.eclipse.org/collections/) (ex. Goldman Sachs GS Collections), 
-[Real Logic Agrona](https://github.com/real-logic/agrona),
-[OpenHFT Chronicle-Wire](https://github.com/OpenHFT/Chronicle-Wire),
-[LZ4 Java](https://github.com/lz4/lz4-java),
-and [Adaptive Radix Trees](https://db.in.tum.de/~leis/papers/ART.pdf).
+Java 17 / Spring Boot 交易指令网关，扩展 [exchange-core](https://github.com/exchange-core/exchange-core) 的 HTTP 接入、请求幂等、指令持久化与崩溃恢复。
 
-Exchange-core includes:
-- orders matching engine
-- risk control and accounting module
-- disk journaling and snapshots module
-- trading, admin and reports API
+网关维护指令顺序和执行回执；撮合、风控与账户计算由上游引擎执行。上游基线为 `2f8548749839e9095c8dc597e4b61521d259fa5d`，保留 Apache-2.0 许可证与原始提交历史。[上游原 README](docs/upstream-README.md) 中的性能数据属于原引擎。
 
-Designed for high scalability and pauseless 24/7 operation under high-load conditions and providing low-latency responses:
-- 3M users having 10M accounts in total
-- 100K order books (symbols) having 4M pending orders in total
-- less than 1ms worst wire-to-wire target latency for 1M+ operations per second throughput
-- 150ns per matching for large market orders
+## 执行过程
 
-Single order book configuration is capable to process 5M operations per second on 10-years old hardware (Intel® Xeon® X5690) with moderate latency degradation:
+```text
+HTTP 请求
+  -> 参数校验
+  -> 有界队列 / 满载拒绝
+  -> 单写线程：幂等检查 -> WAL force -> 引擎执行 -> 保存回执
+  -> HTTP 响应
 
-|rate|50.0%|90.0%|95.0%|99.0%|99.9%|99.99%|worst|
-|----|-----|-----|-----|-----|-----|------|-----|
-|125K|0.6µs|0.9µs|1.0µs|1.4µs|4µs  |24µs  |41µs |
-|250K|0.6µs|0.9µs|1.0µs|1.4µs|9µs  |27µs  |41µs |
-|500K|0.6µs|0.9µs|1.0µs|1.6µs|14µs |29µs  |42µs |
-|  1M|0.5µs|0.9µs|1.2µs|4µs  |22µs |31µs  |45µs |
-|  2M|0.5µs|1.2µs|3.9µs|10µs |30µs |39µs  |60µs |
-|  3M|0.7µs|3.6µs|6.2µs|15µs |36µs |45µs  |60µs |
-|  4M|1.0µs|6.0µs|9µs  |25µs |45µs |55µs  |70µs |
-|  5M|1.5µs|9.5µs|16µs |42µs |150µs|170µs |190µs|
-|  6M|5µs  |30µs |45µs |300µs|500µs|520µs |540µs|
-|  7M|60µs |1.3ms|1.5ms|1.8ms|1.9ms|1.9ms |1.9ms|
-
-![Latencies HDR Histogram](hdr-histogram.png)
-
-Benchmark configuration:
-- Single symbol order book.
-- 3,000,000 inbound messages are distributed as follows: 9% GTC orders, 3% IOC orders, 6% cancel commands, 82% move commands. About 6% of all messages are triggering one or more trades.
-- 1,000 active user accounts.
-- In average ~1,000 limit orders are active, placed in ~750 different price slots.
-- Latency results are only for risk processing and orders matching. Other stuff like network interface latency, IPC, journaling is not included.
-- Test data is not bursty, meaning constant interval between commands (0.2~8µs depending on target throughput).
-- BBO prices are not changing significantly throughout the test. No avalanche orders.
-- No coordinated omission effect for latency benchmark. Any processing delay affects measurements for next following messages.
-- GC is triggered prior/after running every benchmark cycle (3,000,000 messages).
-- RHEL 7.5, network-latency tuned-adm profile, dual X5690 6 cores 3.47GHz, one socket isolated and tickless, spectre/meltdown protection disabled.
-- Java version 8u192, newer Java 8 versions can have a [performance bug](https://bugs.java.com/bugdatabase/view_bug.do?bug_id=JDK-8221355)
-
-### Features
-- HFT optimized. Priority is a limit-order-move operation mean latency (currently ~0.5µs). Cancel operation takes ~0.7µs, placing new order ~1.0µs;
-- In-memory working state for accounting data and order books.
-- Event-sourcing - disk journaling and journal replay support, state snapshots (serialization) and restore operations, LZ4 compression.
-- Lock-free and contention-free orders matching and risk control algorithms.
-- No floating-point arithmetic, no loss of significance is possible.
-- Matching engine and risk control operations are atomic and deterministic.
-- Pipelined multi-core processing (based on LMAX Disruptor): each CPU core is responsible for certain processing stage, user accounts shard, or symbol order books shard.
-- Two different risk processing modes (specified per symbol): direct-exchange and margin-trade.
-- Maker/taker fees (defined in quote currency units).
-- Two order books implementations: simple implementation ("Naive") and performance implementation ("Direct").
-- Order types: Immediate-or-Cancel (IOC), Good-till-Cancel (GTC), Fill-or-Kill Budget (FOK-B)
-- Testing - unit-tests, integration tests, stress tests, integrity/consistency tests.
-- Low GC pressure, objects pooling, single ring-buffer.
-- Threads affinity (requires JNA).
-- User suspend/resume operation (reduces memory consumption).
-- Core reports API (user balances, open interest).
-
-### Installation
-1. Install library into your Maven's local repository by running `mvn install`
-2. Add the following Maven dependency to your project's `pom.xml`:
-```
-<dependency>
-    <groupId>exchange.core2</groupId>
-    <artifactId>exchange-core</artifactId>
-    <version>0.5.3</version>
-</dependency>
+启动恢复：文件锁 -> 校验日志帧 -> 从固定初始状态重放 -> 重建状态和回执 -> 开放受理
 ```
 
-Alternatively, you can clone this repository and run the [example test](https://github.com/mzheravin/exchange-core/tree/master/src/test/java/exchange/core2/tests/examples/ITCoreExample.java).
+- **并发与读取顺序**：单线程拥有幂等表和指令序号；查询也进入同一队列，再从引擎取得订单簿副本。HTTP 控制器等待 `CompletableFuture` 完成。
+- **请求幂等**：`(uid, key)` 标识请求；同号同参复用回执，同号异参返回 HTTP 409。业务风控拒绝也保留原结果，队列拒绝发生在写日志之前。
+- **写前日志**：16 字节帧头包含魔数、长度、长度反码和 CRC32C；事件保存格式版本、连续序号和完整请求。`FileChannel.force(true)` 完成后才提交引擎。
+- **状态恢复**：从相同初始配置顺序重放，重建订单、账户及幂等表。半写尾帧截断到最后完整记录；完整帧损坏、序号跳跃、重复键或不支持的格式版本会阻止启动。
+- **结果未知**：引擎执行超时后暂停后续操作，重启重放恢复；客户端重试仍须沿用原 `uid` 和 `key`。
+- **资源关闭**：停止准入，等待队列排空，再关闭引擎和日志。文件锁限定一个进程拥有同一份 WAL。
 
-### Usage examples
-Create and start empty exchange core:
-```java
-// simple async events handler
-SimpleEventsProcessor eventsProcessor = new SimpleEventsProcessor(new IEventsHandler() {
-    @Override
-    public void tradeEvent(TradeEvent tradeEvent) {
-        System.out.println("Trade event: " + tradeEvent);
-    }
+## 构建与运行
 
-    @Override
-    public void reduceEvent(ReduceEvent reduceEvent) {
-        System.out.println("Reduce event: " + reduceEvent);
-    }
+需要 JDK 17 和 Maven 3.9+。先在仓库根目录安装引擎，再构建网关：
 
-    @Override
-    public void rejectEvent(RejectEvent rejectEvent) {
-        System.out.println("Reject event: " + rejectEvent);
-    }
-
-    @Override
-    public void commandResult(ApiCommandResult commandResult) {
-        System.out.println("Command result: " + commandResult);
-    }
-
-    @Override
-    public void orderBook(OrderBook orderBook) {
-        System.out.println("OrderBook event: " + orderBook);
-    }
-});
-
-// default exchange configuration
-ExchangeConfiguration conf = ExchangeConfiguration.defaultBuilder().build();
-
-// no serialization
-Supplier<ISerializationProcessor> serializationProcessorFactory = () -> DummySerializationProcessor.INSTANCE;
-
-// build exchange core
-ExchangeCore exchangeCore = ExchangeCore.builder()
-        .resultsConsumer(eventsProcessor)
-        .serializationProcessorFactory(serializationProcessorFactory)
-        .exchangeConfiguration(conf)
-        .build();
-
-// start up disruptor threads
-exchangeCore.startup();
-
-// get exchange API for publishing commands
-ExchangeApi api = exchangeCore.getApi();
+```sh
+mvn -B -ntp -f pom.xml '-P!default' -Dmaven.test.skip=true install
+mvn -B -ntp -f reliable-gateway/pom.xml clean verify
 ```
 
-Create new symbol:
-```java
-// currency code constants
-final int currencyCodeXbt = 11;
-final int currencyCodeLtc = 15;
+第一条关闭上游的发布和 delombok profile，安装本仓库的引擎代码；第二条运行网关全部测试并生成可执行 JAR。上游性能实验不包含在这两条命令的验证范围内。
 
-// symbol constants
-final int symbolXbtLtc = 241;
+Linux / macOS：
 
-// create symbol specification and publish it
-CoreSymbolSpecification symbolSpecXbtLtc = CoreSymbolSpecification.builder()
-        .symbolId(symbolXbtLtc)         // symbol id
-        .type(SymbolType.CURRENCY_EXCHANGE_PAIR)
-        .baseCurrency(currencyCodeXbt)    // base = satoshi (1E-8)
-        .quoteCurrency(currencyCodeLtc)   // quote = litoshi (1E-8)
-        .baseScaleK(1_000_000L) // 1 lot = 1M satoshi (0.01 BTC)
-        .quoteScaleK(10_000L)   // 1 price step = 10K litoshi
-        .takerFee(1900L)        // taker fee 1900 litoshi per 1 lot
-        .makerFee(700L)         // maker fee 700 litoshi per 1 lot
-        .build();
-
-future = api.submitBinaryDataAsync(new BatchAddSymbolsCommand(symbolSpecXbtLtc));
+```sh
+java --add-opens=java.base/java.lang=ALL-UNNAMED \
+  --add-opens=java.base/java.lang.reflect=ALL-UNNAMED \
+  --add-opens=java.base/java.io=ALL-UNNAMED \
+  --add-opens=java.base/java.nio=ALL-UNNAMED \
+  --add-opens=java.base/sun.nio.ch=ALL-UNNAMED \
+  --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED \
+  -jar reliable-gateway/target/reliable-trading-gateway-0.1.0-SNAPSHOT.jar \
+  --trading.journal=./data/commands.wal
 ```
 
-Create new users:
-```java
-// create user uid=301
-future = api.submitCommandAsync(ApiAddUser.builder()
-        .uid(301L)
-        .build());
+Windows PowerShell（`JAVA_HOME` 指向 JDK 17、Maven 在 PATH 中）：
 
-// create user uid=302
-future = api.submitCommandAsync(ApiAddUser.builder()
-        .uid(302L)
-        .build());
+```powershell
+./reliable-gateway/build.ps1 package
+./reliable-gateway/build.ps1 run
 ```
 
-Perform deposits:
-```java
-// first user deposits 20 LTC
-future = api.submitCommandAsync(ApiAdjustUserBalance.builder()
-        .uid(301L)
-        .currency(currencyCodeLtc)
-        .amount(2_000_000_000L)
-        .transactionId(1L)
-        .build());
+默认监听 `127.0.0.1:8287`；队列容量由 `trading.queue-capacity` 配置，默认 1024。WAL 路径由 `trading.journal` 配置，默认 `data/commands.wal`，相对于启动目录。
 
-// second user deposits 0.10 BTC
-future = api.submitCommandAsync(ApiAdjustUserBalance.builder()
-        .uid(302L)
-        .currency(currencyCodeXbt)
-        .amount(10_000_000L)
-        .transactionId(2L)
-        .build());
+## HTTP 示例
+
+以下示例使用 Bash 的 curl；PowerShell 可使用 `Invoke-RestMethod` 或 `curl.exe`。
+
+```sh
+curl -sS http://127.0.0.1:8287/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"uid":1,"key":"sell-001","side":"ASK","orderType":"GTC","price":100,"size":10}'
+# {"sequence":1,"orderId":1,"result":"SUCCESS"}
+
+curl -sS http://127.0.0.1:8287/book
+
+curl -sS http://127.0.0.1:8287/orders/1/cancel \
+  -H 'Content-Type: application/json' \
+  -d '{"uid":1,"key":"cancel-001"}'
+
+curl -sS http://127.0.0.1:8287/status
 ```
 
-Place orders:
-```java
-// first user places Good-till-Cancel Bid order
-// he assumes BTCLTC exchange rate 154 LTC for 1 BTC
-// bid price for 1 lot (0.01BTC) is 1.54 LTC => 1_5400_0000 litoshi => 10K * 15_400 (in price steps)
-future = api.submitCommandAsync(ApiPlaceOrder.builder()
-        .uid(301L)
-        .orderId(5001L)
-        .price(15_400L)
-        .reservePrice(15_600L) // can move bid order up to the 1.56 LTC, without replacing it
-        .size(12L) // order size is 12 lots
-        .action(OrderAction.BID)
-        .orderType(OrderType.GTC) // Good-till-Cancel
-        .symbol(symbolXbtLtc)
-        .build());
+新建空日志时，上述下单产生订单 1；再次发送相同请求返回原回执。保持 key 不变而修改价格会返回 HTTP 409。参数错误返回 HTTP 400，队列满或网关故障返回 HTTP 503；业务拒绝放在回执的 `result` 中，与传输错误分别处理。
 
-// second user places Immediate-or-Cancel Ask (Sell) order
-// he assumes wost rate to sell 152.5 LTC for 1 BTC
-future = api.submitCommandAsync(ApiPlaceOrder.builder()
-        .uid(302L)
-        .orderId(5002L)
-        .price(15_250L)
-        .size(10L) // order size is 10 lots
-        .action(OrderAction.ASK)
-        .orderType(OrderType.IOC) // Immediate-or-Cancel
-        .symbol(symbolXbtLtc)
-        .build());
-```
+## 代码与验证
 
-Request order book:
-```java
-future = api.requestOrderBookAsync(symbolXbtLtc, 10);
-```
+| 文件 | 职责 |
+| --- | --- |
+| `DurableGateway.java` | 有界准入、单写线程、幂等、故障标记和回执 |
+| `FileJournal.java` | 独占文件锁、帧校验、强制刷盘及尾帧恢复 |
+| `EngineSession.java` | 引擎初始化、指令映射、订单簿副本及资金守恒报告 |
+| `TradingController.java` / `TradingErrors.java` | HTTP 接口、输入校验和异常映射 |
 
-GtC orders manipulations:
-```java
-// first user moves remaining order to price 1.53 LTC
-future = api.submitCommandAsync(ApiMoveOrder.builder()
-        .uid(301L)
-        .orderId(5001L)
-        .newPrice(15_300L)
-        .symbol(symbolXbtLtc)
-        .build());
-        
-// first user cancel remaining order
-future = api.submitCommandAsync(ApiCancelOrder.builder()
-        .uid(301L)
-        .orderId(5001L)
-        .symbol(symbolXbtLtc)
-        .build());
-```
+实现位于 [`reliable-gateway/src`](reliable-gateway/src)。JUnit 测试覆盖并发重复请求、同号异参、用户命名空间、部分成交与撤单后恢复、拒绝回执重放、刷盘后无回执恢复、队列饱和、故障后拒绝、日志损坏和第二写进程；HTTP 接口使用 Spring MockMvc 验证。
 
-Check user balance and GtC orders:
-```java
-Future<SingleUserReportResult> report = api.processReport(new SingleUserReportQuery(301), 0);
-```
+当前模型固定为交易对 `1001`，用户 `1`、`2`，各币种初始余额均为 `1_000_000_000`，使用整数价格和数量，支持 GTC / IOC。恢复要求保持相同初始配置、业务规则和引擎版本。日志与历史幂等记录完整保留，恢复成本随指令历史增长；逐条刷盘与串行执行优先保证状态语义。当前没有快照截断、多副本协调、身份鉴权或外部资金接入。
 
-Check system balance:
-```java
-// check fees collected
-Future<TotalCurrencyBalanceReportResult> totalsReport = api.processReport(new TotalCurrencyBalanceReportQuery(), 0);
-System.out.println("LTC fees collected: " + totalsReport.get().getFees().get(currencyCodeLtc));
-```
+## 来源与许可证
 
-### Testing
-- latency test: mvn -Dtest=PerfLatency#testLatencyMargin test
-- throughput test: mvn -Dtest=PerfThroughput#testThroughputMargin test
-- hiccups test: mvn -Dtest=PerfHiccups#testHiccups test
-- serialization test: mvn -Dtest=PerfPersistence#testPersistenceMargin test
-
-### TODOs
-- market data feeds (full order log, L2 market data, BBO, trades)
-- clearing and settlement
-- reporting
-- clustering
-- FIX and REST API gateways
-- cryptocurrency payment gateway
-- more tests and benchmarks
-- NUMA-aware and CPU layout custom configuration
-
-### Contributing
-Exchange-core is an open-source project and contributions are welcome!
-
-### Support
-- [Discussion group in Telegram (t.me/exchangecoretalks)](https://t.me/exchangecoretalks)
-- [News channel in Telegram (t.me/exchangecore)](https://t.me/exchangecore)
-
-[license]:LICENSE.txt
-[license img]:https://img.shields.io/badge/License-Apache%202-blue.svg
+撮合、风控、账户计算和原始测试来自 [exchange-core/exchange-core](https://github.com/exchange-core/exchange-core)。本仓库新增 `reliable-gateway/`、构建验证工作流及文档；上游测试中的 Nashorn `@Ignore` 替换为 JUnit 5 `@Disabled`，以兼容 JDK 17。[LICENSE.txt](LICENSE.txt) 保留 Apache License 2.0。

@@ -1,0 +1,33 @@
+name: Gateway verification
+
+on:
+  push:
+    branches: [master, 'feat/**']
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  gateway:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Install the engine from this checkout
+        run: mvn -B -ntp -f pom.xml '-P!default' -Dmaven.test.skip=true install
+      - name: Test and package the gateway
+        run: mvn -B -ntp -f reliable-gateway/pom.xml clean verify
+      - name: Retain test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-test-reports
+          path: reliable-gateway/target/surefire-reports/
+          if-no-files-found: ignore

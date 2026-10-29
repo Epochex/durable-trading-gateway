@@ -10,3 +10,8 @@ delombok/
 
 # dumps #
 dumps/*.ec*
+reliable-gateway/data/
+data/
+*.wal
+*.log
+docs/superpowers/
